@@ -414,3 +414,341 @@ class Sprites:
             self.cache[key] = make_sprite(grid, pal, scale)
         return self.cache[key]
 
+
+# ----------------------------------------------------------------------------
+# SUARA (prosedural)
+# ----------------------------------------------------------------------------
+class Sfx:
+    RATE = 22050
+
+    def __init__(self):
+        self.sounds = {}
+        self.ok = False
+        self.muted = False
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(self.RATE, -16, 1, 512)
+            self.ok = pygame.mixer.get_init() is not None
+        except pygame.error:
+            self.ok = False
+        if not self.ok:
+            return
+        mk = self._make
+        self.sounds = {
+            "launch": mk([(380, 90, 0.30, 0.8, False)]),
+            "paddle": mk([(300, 70, 0.35, 0.4, False)]),
+            "brick": mk([(260, 60, 0.35, -0.3, False)]),
+            "strong": mk([(200, 70, 0.35, -0.2, False)]),
+            "metal": mk([(150, 70, 0.30, -0.1, False)]),
+            "explode": mk([(0, 280, 0.45, 0.0, True)]),
+            "powerup": mk([(520, 70, 0.30, 0, False), (780, 110, 0.30, 0, False)]),
+            "laser": mk([(900, 80, 0.20, -0.6, False)]),
+            "lose": mk([(300, 380, 0.40, -0.75, False)]),
+            "hurt": mk([(220, 160, 0.40, -0.5, False)]),
+            "boss_hit": mk([(130, 90, 0.40, 0.3, False)]),
+            "boss_die": mk([(0, 650, 0.50, 0.0, True)]),
+            "perk": mk([(523, 90, 0.30, 0, False), (659, 90, 0.30, 0, False),
+                        (784, 90, 0.30, 0, False), (1046, 200, 0.30, 0, False)]),
+            "clear": mk([(523, 110, 0.30, 0, False), (659, 110, 0.30, 0, False),
+                         (784, 110, 0.30, 0, False), (1046, 220, 0.30, 0, False)]),
+            "gameover": mk([(392, 200, 0.35, 0, False), (330, 200, 0.35, 0, False),
+                            (262, 380, 0.35, 0, False)]),
+        }
+
+    def _make(self, notes):
+        buf = array("h")
+        for freq, ms, vol, sweep, noise in notes:
+            n = int(self.RATE * ms / 1000)
+            phase = 0.0
+            for i in range(n):
+                t = i / n
+                if noise:
+                    s = random.uniform(-1, 1)
+                else:
+                    phase += 2 * math.pi * freq * (1 + sweep * t) / self.RATE
+                    s = (math.sin(phase) + 0.3 * math.sin(2 * phase)) / 1.3
+                env = min(1.0, i / 120) * (1 - t) ** 1.4
+                buf.append(int(s * env * vol * 32767))
+        return pygame.mixer.Sound(buffer=buf.tobytes())
+
+    def play(self, name):
+        if self.ok and not self.muted and name in self.sounds:
+            self.sounds[name].play()
+
+
+# ----------------------------------------------------------------------------
+# OBJEK GAME
+# ----------------------------------------------------------------------------
+class Paddle:
+    def __init__(self):
+        self.base_w = float(BASE_PADDLE_W)
+        self.w = self.base_w
+        self.target_w = self.base_w
+        self.h = 16
+        self.x = WIDTH / 2
+        self.y = HEIGHT - 48
+        self.speed = 10.0
+        self.effect_timer = 0.0
+        self.laser_timer = 0.0
+        self.laser_cd = 0.0
+
+    @property
+    def rect(self):
+        return pygame.Rect(int(self.x - self.w / 2), int(self.y), int(self.w), self.h)
+
+    def reset_effects(self):
+        self.target_w = self.base_w
+        self.effect_timer = 0.0
+        self.laser_timer = 0.0
+        self.laser_cd = 0.0
+
+    def clamp_x(self):
+        self.x = clamp(self.x, self.w / 2, WIDTH - self.w / 2)
+
+    def update(self, dt, f):
+        if self.effect_timer > 0:
+            self.effect_timer -= dt
+        if self.effect_timer <= 0:
+            self.target_w = self.base_w
+        if self.laser_timer > 0:
+            self.laser_timer -= dt
+        if self.laser_cd > 0:
+            self.laser_cd -= dt
+        self.w += (self.target_w - self.w) * min(1.0, 0.2 * f)
+        self.clamp_x()
+
+    def draw(self, surf):
+        r = self.rect
+        for i in range(0, r.w, CELL):
+            cw = min(CELL, r.w - i)
+            for j in range(4):
+                n = hash_noise(i // CELL, j, 7)
+                col = vary((88, 205, 228), 0.15, n)
+                if j == 0:
+                    col = shade(col, 1.25)
+                elif j == 3:
+                    col = shade(col, 0.7)
+                pygame.draw.rect(surf, col, (r.x + i, r.y + j * CELL, cw, CELL))
+        pygame.draw.rect(surf, (20, 70, 90), r, 1)
+        if self.laser_timer > 0:
+            for cx in (r.left + 8, r.right - 14):
+                pygame.draw.rect(surf, (150, 110, 60), (cx, r.y - 10, 6, 10))
+                pygame.draw.rect(surf, (200, 200, 210), (cx - 1, r.y - 14, 8, 5))
+
+
+class Ball:
+    def __init__(self, x, y, speed, stuck=True):
+        self.x, self.y = x, y
+        self.r = 8
+        self.speed = speed
+        self.dx, self.dy = 0.0, -1.0
+        self.stuck = stuck
+        self.dead = False
+        self.trail = []
+        self.touching = set()
+
+    def set_angle(self, deg):
+        a = math.radians(deg)
+        self.dx, self.dy = math.sin(a), -math.cos(a)
+
+    def fix_dir(self):
+        if abs(self.dy) < 0.22:
+            self.dy = 0.22 if self.dy >= 0 else -0.22
+        n = math.hypot(self.dx, self.dy)
+        self.dx /= n
+        self.dy /= n
+
+
+FLASH = {"brick": None}
+TEX = {}
+
+
+class Brick:
+    def __init__(self, x, y, kind, col):
+        self.rect = pygame.Rect(x, y, BRICK_W, BRICK_H)
+        self.kind = kind
+        self.col = col
+        self.max_hp = BLOCK_INFO[kind][0]
+        self.hp = self.max_hp
+        self.points = BLOCK_INFO[kind][1]
+        self.alive = True
+        self.flash = 0
+
+    @property
+    def breakable(self):
+        return self.kind != "b"
+
+    def particle_color(self):
+        return BLOCK_INFO[self.kind][2]
+
+    def draw(self, surf):
+        r = self.rect
+        if self.kind == "c":
+            pygame.draw.rect(surf, (50, 20, 80), r)
+            pygame.draw.rect(surf, (110, 50, 170), r, 2)
+            cx, cy = r.center
+            pygame.draw.polygon(surf, (255, 120, 220),
+                                [(cx, r.top + 2), (cx + 14, cy), (cx, r.bottom - 2),
+                                 (cx - 14, cy)])
+            pygame.draw.polygon(surf, (255, 220, 250),
+                                [(cx, r.top + 6), (cx + 6, cy), (cx, r.bottom - 6),
+                                 (cx - 6, cy)])
+        else:
+            surf.blit(TEX[self.kind], r)
+        if self.hp < self.max_hp and self.kind != "b":
+            n = min(3, 1 + int((1 - self.hp / self.max_hp) * 3))
+            for path in CRACKS[:n]:
+                pts = [(r.x + px, r.y + py) for px, py in path]
+                pygame.draw.line(surf, (15, 15, 15), pts[0], pts[1], 2)
+                pygame.draw.line(surf, (15, 15, 15), pts[1], pts[2], 2)
+        if self.flash > 0:
+            self.flash -= 1
+            if FLASH["brick"] is not None:
+                surf.blit(FLASH["brick"], r)
+
+
+class PowerUp:
+    def __init__(self, x, y, kind):
+        self.x, self.y = x, y
+        self.kind = kind
+        self.w, self.h = 24, 24
+        self.t = 0.0
+
+    @property
+    def rect(self):
+        return pygame.Rect(int(self.x - 12), int(self.y - 12), 24, 24)
+
+    def update(self, f):
+        self.y += 2.8 * f
+        self.t += f
+
+    def draw(self, surf, sprites):
+        spr = sprites.get(POWERUPS[self.kind][1], 3)
+        bob = int(math.sin(self.t * 0.15) * 2)
+        pygame.draw.circle(surf, (0, 0, 0), (int(self.x), int(self.y) + 14), 8)
+        pygame.draw.rect(surf, POWERUPS[self.kind][2],
+                         (int(self.x) - 15, int(self.y) - 15 + bob, 30, 30), 2)
+        surf.blit(spr, (int(self.x) - 12, int(self.y) - 12 + bob))
+
+
+class Projectile:
+    def __init__(self, kind, x, y, vx, vy):
+        self.kind = kind
+        self.x, self.y = x, y
+        self.vx, self.vy = vx, vy
+        self.w = 24 if kind == "tnt" else 18
+        self.h = self.w
+        self.dead = False
+        self.t = 0.0
+
+    @property
+    def rect(self):
+        return pygame.Rect(int(self.x - self.w / 2), int(self.y - self.h / 2),
+                           self.w, self.h)
+
+    def update(self, f):
+        self.x += self.vx * f
+        self.y += self.vy * f
+        self.t += f
+        if self.y > HEIGHT + 30 or self.x < -40 or self.x > WIDTH + 40:
+            self.dead = True
+
+    def draw(self, surf):
+        r = self.rect
+        if self.kind == "tnt":
+            blink = int(self.t / 6) % 2 == 0
+            pygame.draw.rect(surf, (235, 235, 235) if blink else (205, 45, 35), r)
+            pygame.draw.rect(surf, (205, 45, 35), (r.x, r.y, r.w, 8))
+            pygame.draw.rect(surf, (205, 45, 35), (r.x, r.bottom - 8, r.w, 8))
+            pygame.draw.rect(surf, BLACK, r, 2)
+        elif self.kind == "skull":
+            pygame.draw.rect(surf, (60, 60, 68), r)
+            pygame.draw.rect(surf, BLACK, (r.x + 3, r.y + 5, 4, 4))
+            pygame.draw.rect(surf, BLACK, (r.right - 7, r.y + 5, 4, 4))
+            pygame.draw.rect(surf, (180, 40, 200), r, 2)
+        else:
+            pygame.draw.circle(surf, (120, 40, 170), r.center, 11)
+            pygame.draw.circle(surf, (210, 90, 240), r.center, 7)
+            pygame.draw.circle(surf, (255, 220, 255), r.center, 3)
+
+
+BOSS_DATA = {
+    "creeper": {"name": "Creeper Raksasa", "hp": 26, "w": 128, "h": 128},
+    "wither": {"name": "Wither", "hp": 38, "w": 208, "h": 64},
+    "dragon": {"name": "Ender Dragon", "hp": 52, "w": 200, "h": 72},
+}
+
+
+class Boss:
+    def __init__(self, kind):
+        d = BOSS_DATA[kind]
+        self.kind = kind
+        self.name = d["name"]
+        self.max_hp = float(d["hp"])
+        self.hp = self.max_hp
+        self.w, self.h = d["w"], d["h"]
+        self.x = WIDTH / 2 - self.w / 2
+        self.base_y = float(HUD_H + 30)
+        self.y = self.base_y
+        self.vx = random.choice((-1.2, 1.2))
+        self.t = 0.0
+        self.attack_cd = 2.5
+        self.alive = True
+        self.hurt_cd = 0.0
+        self.flash = 0.0
+        self.phase = 1
+        self.dir = 1
+
+    @property
+    def rect(self):
+        return pygame.Rect(int(self.x), int(self.y), self.w, self.h)
+
+    def interval(self):
+        base = {"creeper": 3.0, "wither": 1.7, "dragon": 3.0}[self.kind]
+        return base if self.phase == 1 else base * 0.65
+
+    def update(self, dt, f, game):
+        self.t += dt
+        if self.hurt_cd > 0:
+            self.hurt_cd -= dt
+        if self.flash > 0:
+            self.flash -= dt
+        spd = 1.0 if self.phase == 1 else 1.5
+        if self.kind in ("creeper", "wither"):
+            self.x += self.vx * spd * f
+            if self.x < 10:
+                self.x, self.vx = 10, abs(self.vx)
+            elif self.x + self.w > WIDTH - 10:
+                self.x, self.vx = WIDTH - 10 - self.w, -abs(self.vx)
+            if self.kind == "wither":
+                self.y = self.base_y + math.sin(self.t * 2) * 10
+        else:
+            amp = WIDTH / 2 - self.w / 2 - 20
+            self.x = WIDTH / 2 - self.w / 2 + math.sin(self.t * 0.8 * spd) * amp
+            self.dir = 1 if math.cos(self.t * 0.8 * spd) >= 0 else -1
+            self.y = self.base_y + math.sin(self.t * 1.7) * 14
+        self.attack_cd -= dt
+        if self.attack_cd <= 0:
+            self.attack(game)
+            self.attack_cd = self.interval()
+
+    def attack(self, game):
+        px = game.paddle.x
+        r = self.rect
+        cx, cy = r.centerx, r.bottom - 8
+        if self.kind == "creeper":
+            game.shoot("tnt", cx, cy, px, 3.2)
+            if self.phase == 2:
+                game.shoot("tnt", cx, cy, px + random.choice((-110, 110)), 3.2)
+        elif self.kind == "wither":
+            if self.phase == 1:
+                game.shoot("skull", cx, cy, px, 3.8)
+            else:
+                for off in (-110, 0, 110):
+                    game.shoot("skull", cx, cy, px + off, 3.8)
+        else:
+            scale = 1.0 if self.phase == 2 else 0.7
+            for off in (-200, -100, 0, 100, 200):
+                game.shoot("breath", cx, cy, px + off * scale, 3.0)
+
+
