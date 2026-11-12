@@ -752,3 +752,1229 @@ class Boss:
                 game.shoot("breath", cx, cy, px + off * scale, 3.0)
 
 
+
+# ----------------------------------------------------------------------------
+# FUNGSI TABRAKAN
+# ----------------------------------------------------------------------------
+def circle_rect(ball, rect):
+    """Return (d2, dx, dy, push) bila bola menabrak rect, selain itu None."""
+    cx = clamp(ball.x, rect.left, rect.right)
+    cy = clamp(ball.y, rect.top, rect.bottom)
+    dx, dy = ball.x - cx, ball.y - cy
+    d2 = dx * dx + dy * dy
+    if d2 >= ball.r * ball.r:
+        return None
+    if d2 == 0:
+        l, rt = ball.x - rect.left, rect.right - ball.x
+        tp, bt = ball.y - rect.top, rect.bottom - ball.y
+        m = min(l, rt, tp, bt)
+        if m == l:
+            dx, dy = -1.0, 0.0
+        elif m == rt:
+            dx, dy = 1.0, 0.0
+        elif m == tp:
+            dx, dy = 0.0, -1.0
+        else:
+            dx, dy = 0.0, 1.0
+        push = ball.r + m
+    else:
+        push = ball.r - math.sqrt(d2)
+    return d2, dx, dy, push
+
+
+def bounce(ball, dx, dy, push):
+    if abs(dx) > abs(dy):
+        sgn = 1 if dx > 0 else -1
+        ball.dx = abs(ball.dx) * sgn
+        ball.x += push * sgn
+    else:
+        sgn = 1 if dy > 0 else -1
+        ball.dy = abs(ball.dy) * sgn
+        ball.y += push * sgn
+
+
+# ----------------------------------------------------------------------------
+# GAME MANAGER
+# ----------------------------------------------------------------------------
+class Game:
+    def __init__(self):
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        pygame.display.set_caption("Brick Breaker - Craft Edition (005)")
+        self.canvas = pygame.Surface((WIDTH, HEIGHT)).convert()
+        self.clock = pygame.time.Clock()
+        self.sfx = Sfx()
+
+        self.f_title = pygame.font.Font(None, 84)
+        self.f_big = pygame.font.Font(None, 56)
+        self.f_med = pygame.font.Font(None, 32)
+        self.f_small = pygame.font.Font(None, 24)
+        self.f_tiny = pygame.font.Font(None, 20)
+
+        self.sprites = Sprites()
+        for k in BLOCK_INFO:
+            if k != "c":
+                TEX[k] = make_block_texture(k, self.f_tiny)
+        fl = pygame.Surface((BRICK_W, BRICK_H), pygame.SRCALPHA)
+        fl.fill((255, 255, 255, 110))
+        FLASH["brick"] = fl
+        self.ball_imgs = {
+            "normal": self._make_ball((205, 220, 240), (250, 252, 255)),
+            "fire": self._make_ball((255, 120, 20), (255, 225, 90)),
+        }
+        self.boss_tex = self._make_boss_textures()
+        self.boss_flash = {}
+        for k, t in self.boss_tex.items():
+            o = pygame.Surface(t.get_rect().size, pygame.SRCALPHA)
+            o.fill((255, 255, 255, 140))
+            self.boss_flash[k] = o
+        self.boss_icons = self._make_boss_icons()
+
+        self.bgs = {name: self._make_bg(*cols) for name, cols in THEMES.items()}
+        self.dim = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        self.dim.fill((0, 0, 8, 170))
+        self.dim_light = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        self.dim_light.fill((0, 0, 20, 110))
+        self.glow_ball = self._make_glow(24, (150, 210, 255))
+        self.btn_cache = {}
+        self.fade = 1.0
+        self.fade_surf = pygame.Surface((WIDTH, HEIGHT))
+        self.fade_surf.fill(BLACK)
+        self.heart_off = self.sprites.get("heart", 2).copy()
+        self.heart_off.set_alpha(55)
+        self.pause_sel = 0
+        self.ready_t = 0.0
+        self.banner = True
+        self.new_record = False
+
+        # dekor menu
+        self.hills = []
+        for x in range(0, WIDTH + 32, 32):
+            far = 60 + int(26 * math.sin(x * 0.011) + 14 * math.sin(x * 0.031 + 1))
+            near = 24 + int(14 * math.sin(x * 0.02 + 2) + 8 * math.sin(x * 0.05))
+            self.hills.append((x, far, near))
+        self.menu_blocks = [(46, 236, "g", 0.0), (112, 336, "D", 1.3),
+                            (54, 436, "t", 2.6), (694, 256, "s", 0.8),
+                            (640, 356, "o", 2.1), (700, 456, "d", 3.4)]
+        self.splash = random.choice(SPLASHES)
+        self.menu_sel = 0
+        self.codex_page = 0
+
+        save = self._read_save()
+        try:
+            self.high = int(save.get("high", 0))
+        except (TypeError, ValueError):
+            self.high = 0
+        self.sfx.muted = bool(save.get("muted", False))
+        self.running = True
+        self.state = MENU
+        self.prev_state = READY
+        self.state_timer = 0.0
+        self.mouse_mode = False
+        self.mouse_x = WIDTH / 2
+        self.t = 0.0
+        self.shake = 0
+
+        self.paddle = Paddle()
+        self.bricks, self.balls, self.powerups = [], [], []
+        self.lasers, self.particles, self.texts = [], [], []
+        self.projectiles = []
+        self.boss = None
+        self.theme = "day"
+        self.bg_items = self.make_bg_items("day")
+        self.score = 0
+        self.lives = BASE_LIVES
+        self.max_lives = BASE_MAX_LIVES
+        self.stage_idx = 0
+        self.combo = 0
+        self.slow_timer = 0.0
+        self.pierce_timer = 0.0
+        self.invuln = 0.0
+        self.anchor_left = 0
+        self.base_speed = 6.0
+        self.bonus = 0
+        self.perks = {}
+        self.totems = 0
+        self.perk_choices = []
+        self.perk_sel = 0
+        self.cleared_boss = False
+
+    # ----- pembuatan aset -----
+    def _make_ball(self, outline, fill):
+        pat = [".aaa.", "abbba", "abbba", "abbba", ".aaa."]
+        return make_sprite(pat, {"a": outline, "b": fill}, 3)
+
+    def _make_glow(self, radius, color):
+        surf = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+        for i in range(radius, 0, -1):
+            a = int(80 * (1 - i / radius) ** 2)
+            pygame.draw.circle(surf, (*color, a), (radius, radius), i)
+        return surf
+
+    def _make_bg(self, top, bot):
+        bg = pygame.Surface((WIDTH, HEIGHT))
+        for y in range(HEIGHT):
+            k = y / HEIGHT
+            pygame.draw.line(bg, tuple(int(top[i] + (bot[i] - top[i]) * k)
+                                       for i in range(3)), (0, y), (WIDTH, y))
+        return bg.convert()
+
+    def _make_boss_textures(self):
+        creeper = ["gggggggg", "gggggggg", "gkkggkkg", "gkkggkkg",
+                   "gggkkggg", "ggkkkkgg", "ggkkkkgg", "ggkggkgg"]
+        skull = ["gggggggg", "gggggggg", "gkkggkkg", "gkwggwkg",
+                 "gggkkggg", "gggggggg", "gkgkgkgg", "gkgkgkgg"]
+
+        def cfn(ch):
+            return {"g": ((80, 185, 65), 0.22), "k": ((12, 22, 12), 0.2)}[ch]
+
+        def wfn(ch):
+            return {"g": ((78, 78, 86), 0.18), "k": ((10, 10, 12), 0.15),
+                    "w": ((235, 235, 235), 0.0)}[ch]
+
+        ctex = make_textured_grid(creeper, 16, cfn, 3)
+        one = make_textured_grid(skull, 8, wfn, 5)
+        wtex = pygame.Surface((208, 64), pygame.SRCALPHA)
+        for i in range(3):
+            wtex.blit(one, (i * 72, 0))
+        return {"creeper": ctex, "wither": wtex}
+
+    def _make_boss_icons(self):
+        icons = {
+            "creeper": pygame.transform.scale(self.boss_tex["creeper"], (88, 88)),
+            "wither": pygame.transform.scale(self.boss_tex["wither"], (144, 44)),
+        }
+        d = pygame.Surface((144, 44), pygame.SRCALPHA)
+        for i in range(144 // 8):
+            for j in range(44 // 8 + 1):
+                n = hash_noise(i, j, 31)
+                col = vary((28, 22, 40), 0.5, n)
+                if n > 0.93:
+                    col = (70, 40, 110)
+                d.fill(col, (i * 8, j * 8, 8, 8))
+        pygame.draw.rect(d, (90, 60, 130), d.get_rect(), 2)
+        d.fill((255, 80, 230), (96, 10, 12, 8))
+        d.fill((255, 80, 230), (118, 22, 12, 8))
+        icons["dragon"] = d
+        return icons
+
+    def get_button(self, w, h, hover):
+        key = (w, h, hover)
+        if key not in self.btn_cache:
+            self.btn_cache[key] = make_button(w, h, hover)
+        return self.btn_cache[key]
+
+    def make_bg_items(self, theme):
+        items = []
+        if theme == "day":
+            for _ in range(6):
+                items.append([random.uniform(0, WIDTH), random.uniform(80, 360),
+                              random.uniform(0.15, 0.4), 1, (245, 250, 255)])
+        else:
+            col = {"cave": (120, 120, 130), "nether": (255, 140, 40),
+                   "end": (200, 150, 255)}[theme]
+            for _ in range(60):
+                items.append([random.uniform(0, WIDTH), random.uniform(0, HEIGHT),
+                              random.uniform(0.2, 0.8), random.choice((2, 2, 4)),
+                              shade(col, random.uniform(0.5, 1.0))])
+        return items
+
+    # ----- penyimpanan -----
+    def _read_save(self):
+        try:
+            with open(SAVE_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_high(self):
+        try:
+            with open(SAVE_FILE, "w", encoding="utf-8") as fh:
+                json.dump({"high": self.high, "muted": self.sfx.muted}, fh)
+        except OSError:
+            pass
+
+    def update_high(self):
+        if self.score > self.high:
+            self.high = self.score
+
+    # ----- perk helper -----
+    def lv(self, pid):
+        return self.perks.get(pid, 0)
+
+    def dmg(self):
+        return 1 + self.lv("sharpness")
+
+    def drop_chance(self):
+        return 0.16 + 0.07 * self.lv("fortune")
+
+    def dur_mult(self):
+        return 1 + 0.4 * self.lv("unbreaking")
+
+    def multiplier(self):
+        return (1 + min(self.combo // 4, 4)) * (1 + 0.25 * self.lv("looting"))
+
+    def refresh_perk_stats(self):
+        self.max_lives = BASE_MAX_LIVES + self.lv("health")
+        self.paddle.base_w = float(BASE_PADDLE_W + 18 * self.lv("shield"))
+
+    # ----- menu -----
+    def menu_items(self):
+        return [("MULAI MAIN", "sword"),
+                ("CARA BERMAIN", "arrow"),
+                ("KOLEKSI", "diamond"),
+                ("SUARA : %s" % ("MATI" if self.sfx.muted else "HIDUP"), "pearl"),
+                ("KELUAR", "shield")]
+
+    def menu_rect(self, i):
+        return pygame.Rect((WIDTH - BTN_W) // 2, BTN_Y0 + i * BTN_STEP, BTN_W, BTN_H)
+
+    def menu_at(self, pos):
+        for i in range(len(self.menu_items())):
+            if self.menu_rect(i).collidepoint(pos):
+                return i
+        return None
+
+    def menu_activate(self, i):
+        self.sfx.play("brick")
+        if i == 0:
+            self.start_game()
+        elif i == 1:
+            self.state = HOWTO
+        elif i == 2:
+            self.codex_page = 0
+            self.state = CODEX
+        elif i == 3:
+            self.sfx.muted = not self.sfx.muted
+            self.save_high()
+            self.sfx.play("powerup")
+        elif i == 4:
+            self.running = False
+
+    def go_menu(self, keep_sel=False):
+        self.state = MENU
+        self.fade = 1.0
+        self.theme = "day"
+        self.bg_items = self.make_bg_items("day")
+        self.balls, self.powerups, self.lasers = [], [], []
+        self.projectiles = []
+        self.shake = 0
+        if not keep_sel:
+            self.menu_sel = 0
+            self.splash = random.choice(SPLASHES)
+
+    # ----- menu pause -----
+    def pause_items(self):
+        return [("LANJUT", "sword"),
+                ("SUARA : %s" % ("MATI" if self.sfx.muted else "HIDUP"), "pearl"),
+                ("MENU UTAMA", "shield")]
+
+    def pause_rect(self, i):
+        return pygame.Rect((WIDTH - BTN_W) // 2, 250 + i * BTN_STEP, BTN_W, BTN_H)
+
+    def pause_at(self, pos):
+        for i in range(len(self.pause_items())):
+            if self.pause_rect(i).collidepoint(pos):
+                return i
+        return None
+
+    def pause_activate(self, i):
+        self.sfx.play("brick")
+        if i == 0:
+            self.state = self.prev_state
+        elif i == 1:
+            self.sfx.muted = not self.sfx.muted
+            self.save_high()
+            self.sfx.play("powerup")
+        elif i == 2:
+            self.update_high()
+            self.save_high()
+            self.go_menu()
+
+    def back_rect(self):
+        return pygame.Rect(WIDTH // 2 - 110, 584, 220, 40)
+
+    def codex_tab_rect(self, i):
+        return pygame.Rect(60 + i * 128, 104, 118, 34)
+
+    # ----- alur game -----
+    def start_game(self):
+        self.score = 0
+        self.lives = BASE_LIVES
+        self.perks = {}
+        self.totems = 0
+        self.combo = 0
+        self.refresh_perk_stats()
+        self.paddle.w = self.paddle.base_w
+        self.load_stage(0)
+
+    def load_stage(self, idx):
+        self.stage_idx = idx
+        st = STAGES[idx]
+        gy = GRID_Y_BOSS if st.get("boss") else GRID_Y_NORMAL
+        self.bricks = []
+        for r, row in enumerate(st["layout"]):
+            for c, ch in enumerate(row):
+                if ch != ".":
+                    self.bricks.append(Brick(GRID_X + c * (BRICK_W + GAP),
+                                             gy + r * (BRICK_H + GAP), ch, c))
+        self.boss = Boss(st["boss"]) if st.get("boss") else None
+        self.theme = st["theme"]
+        self.bg_items = self.make_bg_items(self.theme)
+        self.base_speed = min(9.0, 6.0 + 0.4 * idx)
+        self.powerups, self.lasers, self.balls = [], [], []
+        self.projectiles = []
+        self.paddle.reset_effects()
+        self.paddle.x = WIDTH / 2
+        self.slow_timer = 0.0
+        self.pierce_timer = 0.0
+        self.invuln = 0.0
+        self.combo = 0
+        self.anchor_left = self.lv("anchor")
+        self.spawn_ball()
+        self.state = READY
+        self.ready_t = 0.0
+        self.banner = True
+        self.fade = 1.0
+
+    def spawn_ball(self):
+        p = self.paddle
+        self.balls = [Ball(p.x, p.y - 9, self.base_speed, stuck=True)]
+
+    def launch(self):
+        for b in self.balls:
+            if b.stuck:
+                b.stuck = False
+                b.set_angle(random.choice((-1, 1)) * random.uniform(12, 28))
+        self.sfx.play("launch")
+        self.state = PLAYING
+
+    def action(self):
+        if self.state == MENU:
+            self.menu_activate(self.menu_sel)
+        elif self.state in (GAME_OVER, WIN):
+            self.start_game()
+        elif self.state == READY:
+            self.launch()
+        elif self.state == PLAYING:
+            self.fire_laser()
+        elif self.state == LEVEL_CLEAR:
+            self.proceed()
+        elif self.state == PERK:
+            self.confirm_perk(self.perk_sel)
+        elif self.state == PAUSED:
+            self.state = self.prev_state
+
+    def is_last_stage(self):
+        return self.stage_idx + 1 >= len(STAGES)
+
+    def stage_clear(self, boss=False):
+        self.bonus = self.lives * 100 + (self.stage_idx + 1) * 100 + (500 if boss else 0)
+        self.score += self.bonus
+        self.lives = min(self.max_lives, self.lives + self.lv("regen"))
+        self.update_high()
+        self.balls, self.powerups, self.lasers = [], [], []
+        self.projectiles = []
+        self.cleared_boss = boss
+        self.state = LEVEL_CLEAR
+        self.state_timer = 4.0 if boss else 3.0
+        self.sfx.play("clear")
+        self.confetti()
+
+    def proceed(self):
+        if self.cleared_boss and self.is_last_stage():
+            self.win()
+        elif self.cleared_boss:
+            self.open_perk_screen()
+        else:
+            self.load_stage(self.stage_idx + 1)
+
+    def open_perk_screen(self):
+        pool = [p for p in PERKS if self.lv(p) < PERKS[p]["max"]]
+        self.perk_choices = random.sample(pool, min(3, len(pool)))
+        self.perk_sel = 0
+        self.state = PERK
+        self.sfx.play("perk")
+
+    def confirm_perk(self, i):
+        if not (0 <= i < len(self.perk_choices)):
+            return
+        pid = self.perk_choices[i]
+        self.perks[pid] = self.lv(pid) + 1
+        if pid == "totem":
+            self.totems += 1
+        if pid == "health":
+            self.refresh_perk_stats()
+            self.lives = min(self.max_lives, self.lives + 1)
+        self.refresh_perk_stats()
+        self.sfx.play("powerup")
+        self.load_stage(self.stage_idx + 1)
+
+    def win(self):
+        self.state = WIN
+        self.new_record = self.score > self.high
+        self.update_high()
+        self.save_high()
+        self.confetti()
+
+    def game_over(self):
+        self.state = GAME_OVER
+        self.new_record = self.score > self.high
+        self.update_high()
+        self.save_high()
+        self.sfx.play("gameover")
+
+    def damage_player(self, from_ball):
+        """Kurangi nyawa. Return True jika game over."""
+        self.lives -= 1
+        self.combo = 0
+        self.shake = 14
+        self.sfx.play("lose" if from_ball else "hurt")
+        if self.lives <= 0:
+            if self.totems > 0:
+                self.totems -= 1
+                self.lives = 2
+                self.invuln = 2.0
+                self.float_text(self.paddle.x, self.paddle.y - 30, "TOTEM!", GOLD)
+                self.particles_at(self.paddle.x, self.paddle.y, GOLD, 30, 5.0)
+                return False
+            self.game_over()
+            return True
+        return False
+
+    def lose_ball(self):
+        if self.damage_player(True):
+            return
+        self.powerups, self.lasers, self.projectiles = [], [], []
+        self.paddle.reset_effects()
+        self.slow_timer = 0.0
+        self.pierce_timer = 0.0
+        self.spawn_ball()
+        self.state = READY
+        self.ready_t = 0.0
+        self.banner = False
+
+    def hurt_player(self):
+        if self.invuln > 0:
+            return
+        if not self.damage_player(False):
+            self.invuln = 1.6
+
+    # ----- efek -----
+    def particles_at(self, x, y, color, n=10, speed=3.0):
+        for _ in range(n):
+            a = random.uniform(0, math.tau)
+            s = random.uniform(0.4, 1.0) * speed
+            self.particles.append([x, y, math.cos(a) * s, math.sin(a) * s - 0.8,
+                                   random.uniform(0.35, 0.8), color,
+                                   random.choice((3, 4, 6))])
+        if len(self.particles) > 450:
+            del self.particles[:len(self.particles) - 450]
+
+    def confetti(self):
+        pal = [(98, 164, 56), (255, 215, 60), (70, 230, 230), (205, 45, 35)]
+        for _ in range(90):
+            self.particles_at(random.uniform(80, WIDTH - 80),
+                              random.uniform(120, 300), random.choice(pal), 1, 4.5)
+
+    def float_text(self, x, y, msg, color=WHITE):
+        self.texts.append([x, y, msg, 0.9, color])
+
+    # ----- blok -----
+    def hit_brick(self, b, damage=1):
+        if not b.breakable:
+            self.sfx.play("metal")
+            self.particles_at(b.rect.centerx, b.rect.centery, (200, 200, 210), 4, 2.2)
+            b.flash = 4
+            return False
+        b.hp -= damage
+        b.flash = 5
+        if b.hp <= 0:
+            self.destroy_brick(b)
+            return True
+        self.sfx.play("strong")
+        self.score += 5
+        self.particles_at(b.rect.centerx, b.rect.centery, b.particle_color(), 4, 2.4)
+        return False
+
+    def destroy_brick(self, first):
+        queue = [first]
+        exploded = False
+        while queue:
+            cur = queue.pop()
+            if not cur.alive:
+                continue
+            cur.alive = False
+            pts = int(cur.points * self.multiplier())
+            self.score += pts
+            cx, cy = cur.rect.center
+            self.float_text(cx, cy, "+%d" % pts, GOLD)
+            self.particles_at(cx, cy, cur.particle_color(), 12, 3.4)
+            if cur.kind == "t":
+                exploded = True
+                self.particles_at(cx, cy, (255, 220, 120), 26, 5.5)
+                for o in self.bricks:
+                    if (o.alive and o.breakable and o is not cur
+                            and abs(o.rect.centerx - cx) <= BRICK_W + GAP + 2
+                            and abs(o.rect.centery - cy) <= BRICK_H + GAP + 2):
+                        queue.append(o)
+            if cur.kind == "D" or random.random() < self.drop_chance():
+                kinds, weights = zip(*POWER_WEIGHTS)
+                self.powerups.append(PowerUp(cx, cy, random.choices(kinds, weights)[0]))
+        if exploded:
+            self.shake = max(self.shake, 12)
+            self.sfx.play("explode")
+        else:
+            self.sfx.play("brick")
+        self.update_high()
+
+    def register_brick_hit(self, ball, b):
+        if b.breakable:
+            self.combo += 1
+            ball.speed = min(self.base_speed + 3.5, ball.speed + 0.04)
+        self.hit_brick(b, self.dmg())
+        fire = self.lv("fire")
+        if fire and b.breakable and random.random() < 0.25 * fire:
+            cx, cy = b.rect.center
+            self.particles_at(cx, cy, (255, 140, 20), 10, 3.0)
+            for o in self.bricks:
+                if (o.alive and o.breakable and o is not b
+                        and abs(o.rect.centerx - cx) <= BRICK_W + GAP + 2
+                        and abs(o.rect.centery - cy) <= BRICK_H + GAP + 2):
+                    self.hit_brick(o, 1)
+
+    # ----- power-up -----
+    def apply_powerup(self, kind):
+        p = self.paddle
+        dm = self.dur_mult()
+        self.sfx.play("powerup")
+        self.float_text(p.x, p.y - 24, POWERUPS[kind][0], POWERUPS[kind][2])
+        if kind == "W":
+            p.target_w, p.effect_timer = p.base_w * 1.55, 12.0 * dm
+        elif kind == "N":
+            p.target_w, p.effect_timer = max(60.0, p.base_w * 0.62), 10.0
+        elif kind == "S":
+            self.slow_timer = 10.0 * dm
+        elif kind == "L":
+            self.lives = min(self.max_lives, self.lives + 1)
+        elif kind == "G":
+            p.laser_timer = 10.0 * dm
+        elif kind == "P":
+            self.pierce_timer = 8.0 * dm
+        elif kind == "M":
+            src = next((b for b in self.balls if not b.stuck), None)
+            if src:
+                for ang in (-22, 22):
+                    if len(self.balls) >= 6:
+                        break
+                    nb = Ball(src.x, src.y, src.speed, stuck=False)
+                    a = math.radians(ang)
+                    nb.dx = src.dx * math.cos(a) - src.dy * math.sin(a)
+                    nb.dy = src.dx * math.sin(a) + src.dy * math.cos(a)
+                    nb.fix_dir()
+                    self.balls.append(nb)
+
+    def fire_laser(self):
+        p = self.paddle
+        if p.laser_timer > 0 and p.laser_cd <= 0:
+            r = p.rect
+            self.lasers.append([r.left + 10, r.top - 10])
+            self.lasers.append([r.right - 10, r.top - 10])
+            p.laser_cd = 0.3
+            self.sfx.play("laser")
+
+    # ----- boss -----
+    def shoot(self, kind, x, y, tx, speed):
+        dist_y = max(60.0, self.paddle.y - y)
+        t = dist_y / speed
+        vx = clamp((tx - x) / t, -3.5, 3.5)
+        self.projectiles.append(Projectile(kind, x, y, vx, speed))
+
+    def damage_boss(self, dmg, ignore_cd=False):
+        b = self.boss
+        if not b or not b.alive:
+            return
+        if b.hurt_cd > 0 and not ignore_cd:
+            return
+        if b.kind == "dragon" and any(o.kind == "c" and o.alive for o in self.bricks):
+            dmg *= 0.5
+        b.hp -= dmg
+        b.hurt_cd = 0.12
+        b.flash = 0.12
+        self.sfx.play("boss_hit")
+        self.score += int(20 * self.multiplier())
+        r = b.rect
+        self.particles_at(r.centerx + random.randint(-30, 30), r.bottom - 10,
+                          (255, 255, 255), 6, 3.0)
+        if b.phase == 1 and b.hp <= b.max_hp / 2:
+            b.phase = 2
+            self.shake = 20
+            self.float_text(r.centerx, r.bottom + 10, "FASE 2!", (255, 120, 60))
+        if b.hp <= 0:
+            self.boss_defeated()
+
+    def boss_defeated(self):
+        b = self.boss
+        b.alive = False
+        r = b.rect
+        pal = [(255, 220, 120), (255, 120, 40), (230, 230, 230), (120, 220, 90)]
+        for _ in range(8):
+            self.particles_at(r.centerx + random.randint(-r.w // 2, r.w // 2),
+                              r.centery + random.randint(-r.h // 2, r.h // 2),
+                              random.choice(pal), 16, 6.0)
+        self.shake = 30
+        self.sfx.play("boss_die")
+        self.score += 300
+        self.stage_clear(boss=True)
+
+    # ----- update -----
+    def control_paddle(self, f):
+        k = pygame.key.get_pressed()
+        d = (k[pygame.K_RIGHT] or k[pygame.K_d]) - (k[pygame.K_LEFT] or k[pygame.K_a])
+        if d:
+            self.mouse_mode = False
+            self.paddle.x += d * self.paddle.speed * f
+        elif self.mouse_mode:
+            self.paddle.x += (self.mouse_x - self.paddle.x) * min(1.0, 0.4 * f)
+        self.paddle.clamp_x()
+
+    def ball_paddle(self, ball):
+        r = self.paddle.rect
+        if ball.dy <= 0:
+            return
+        cx, cy = clamp(ball.x, r.left, r.right), clamp(ball.y, r.top, r.bottom)
+        if ((ball.x - cx) ** 2 + (ball.y - cy) ** 2 <= ball.r ** 2
+                and ball.y < r.centery):
+            ball.y = r.top - ball.r - 0.5
+            off = clamp((ball.x - self.paddle.x) / (r.w / 2), -1, 1)
+            ball.set_angle(off * 62 + random.uniform(-2, 2))
+            self.combo = 0
+            self.sfx.play("paddle")
+            self.particles_at(ball.x, r.top, (150, 220, 255), 4, 2.0)
+
+    def ball_brick(self, ball):
+        pierce = self.pierce_timer > 0
+        touching = set()
+        best = None
+        for b in self.bricks:
+            if not b.alive:
+                continue
+            hit = circle_rect(ball, b.rect)
+            if hit is None:
+                continue
+            if pierce and b.breakable:
+                touching.add(id(b))
+                if id(b) not in ball.touching:
+                    self.register_brick_hit(ball, b)
+                continue
+            if best is None or hit[0] < best[0][0]:
+                best = (hit, b)
+        ball.touching = touching
+        if best:
+            (d2, dx, dy, push), b = best
+            bounce(ball, dx, dy, push)
+            self.register_brick_hit(ball, b)
+
+    def ball_boss(self, ball):
+        b = self.boss
+        if not b or not b.alive:
+            return
+        hit = circle_rect(ball, b.rect)
+        if hit is None:
+            return
+        _, dx, dy, push = hit
+        bounce(ball, dx, dy, push)
+        if b.hurt_cd <= 0:
+            self.combo += 1
+            self.damage_boss(self.dmg())
+
+    def ball_projectiles(self, ball):
+        for pr in self.projectiles:
+            if not pr.dead and circle_rect(ball, pr.rect) is not None:
+                pr.dead = True
+                self.score += int(20 * self.multiplier())
+                self.sfx.play("brick")
+                self.particles_at(pr.x, pr.y, (255, 200, 120), 10, 3.0)
+
+    def update_ball(self, ball, f):
+        p = self.paddle
+        if ball.stuck:
+            ball.x, ball.y = p.x, p.y - ball.r - 1
+            return
+        speed = ball.speed * (0.7 if self.slow_timer > 0 else 1.0)
+        dist = speed * f
+        steps = max(1, int(dist / 4) + 1)
+        sd = dist / steps
+        for _ in range(steps):
+            ball.x += ball.dx * sd
+            ball.y += ball.dy * sd
+            if ball.x - ball.r < 0:
+                ball.x, ball.dx = ball.r, abs(ball.dx)
+            elif ball.x + ball.r > WIDTH:
+                ball.x, ball.dx = WIDTH - ball.r, -abs(ball.dx)
+            if ball.y - ball.r < HUD_H:
+                ball.y, ball.dy = HUD_H + ball.r, abs(ball.dy)
+            self.ball_paddle(ball)
+            self.ball_brick(ball)
+            self.ball_boss(ball)
+            if self.state != PLAYING:
+                return
+            self.ball_projectiles(ball)
+            ball.fix_dir()
+            if ball.y - ball.r > HEIGHT:
+                if self.anchor_left > 0:
+                    self.anchor_left -= 1
+                    ball.y = HEIGHT - ball.r - 2
+                    ball.dy = -abs(ball.dy)
+                    ball.fix_dir()
+                    self.float_text(ball.x, HEIGHT - 50, "ANCHOR!", (210, 130, 255))
+                    self.sfx.play("powerup")
+                    self.particles_at(ball.x, HEIGHT - 20, (210, 130, 255), 14, 3.5)
+                else:
+                    ball.dead = True
+                    return
+        ball.trail.append((ball.x, ball.y))
+        if len(ball.trail) > 10:
+            ball.trail.pop(0)
+
+    def update_lasers(self, f):
+        keep = []
+        for ls in self.lasers:
+            ls[1] -= 12 * f
+            if ls[1] < HUD_H:
+                continue
+            hit = False
+            if self.boss and self.boss.alive and self.boss.rect.collidepoint(ls[0], ls[1]):
+                self.damage_boss(1, ignore_cd=True)
+                hit = True
+            if not hit:
+                for pr in self.projectiles:
+                    if not pr.dead and pr.rect.collidepoint(ls[0], ls[1]):
+                        pr.dead = True
+                        self.particles_at(pr.x, pr.y, (255, 200, 120), 8, 3.0)
+                        hit = True
+                        break
+            if not hit:
+                for b in self.bricks:
+                    if b.alive and b.rect.collidepoint(ls[0], ls[1]):
+                        self.hit_brick(b)
+                        hit = True
+                        break
+            if not hit:
+                keep.append(ls)
+        self.lasers = keep
+
+    def update_fx(self, dt, f):
+        for it in self.bg_items:
+            if self.theme == "day":
+                it[0] += it[2] * f
+                if it[0] > WIDTH + 80:
+                    it[0] = -100
+            elif self.theme == "nether":
+                it[1] -= it[2] * 1.2 * f
+                if it[1] < -6:
+                    it[0], it[1] = random.uniform(0, WIDTH), HEIGHT + 4
+            else:
+                it[1] += it[2] * 0.6 * f
+                if it[1] > HEIGHT:
+                    it[0], it[1] = random.uniform(0, WIDTH), -4
+        for p in self.particles:
+            p[0] += p[2] * f
+            p[1] += p[3] * f
+            p[3] += 0.15 * f
+            p[4] -= dt
+        self.particles = [p for p in self.particles if p[4] > 0]
+        for t in self.texts:
+            t[1] -= 0.8 * f
+            t[3] -= dt
+        self.texts = [t for t in self.texts if t[3] > 0]
+        if self.shake > 0:
+            self.shake -= 1 * f
+
+    def update_playing(self, dt, f):
+        self.control_paddle(f)
+        self.paddle.update(dt, f)
+        if self.invuln > 0:
+            self.invuln -= dt
+        if self.slow_timer > 0:
+            self.slow_timer -= dt
+        if self.pierce_timer > 0:
+            self.pierce_timer -= dt
+
+        for b in list(self.balls):
+            self.update_ball(b, f)
+            if self.state != PLAYING:
+                return
+        self.balls = [b for b in self.balls if not b.dead]
+
+        if self.boss and self.boss.alive:
+            self.boss.update(dt, f, self)
+
+        for pr in self.projectiles:
+            pr.update(f)
+            if not pr.dead and pr.rect.colliderect(self.paddle.rect):
+                pr.dead = True
+                self.particles_at(pr.x, pr.y, (255, 160, 60), 14, 4.0)
+                if pr.kind == "tnt":
+                    self.shake = max(self.shake, 10)
+                self.hurt_player()
+                if self.state != PLAYING:
+                    return
+        self.projectiles = [pr for pr in self.projectiles if not pr.dead]
+
+        for pu in self.powerups:
+            pu.update(f)
+            if pu.rect.colliderect(self.paddle.rect):
+                self.apply_powerup(pu.kind)
+                pu.y = HEIGHT + 100
+        self.powerups = [pu for pu in self.powerups if pu.y < HEIGHT + 30]
+
+        self.update_lasers(f)
+        if self.state != PLAYING:
+            return
+
+        if not self.balls:
+            self.lose_ball()
+            return
+        self.bricks = [b for b in self.bricks if b.alive]
+        if not self.boss and not any(b.breakable for b in self.bricks):
+            self.stage_clear(boss=False)
+
+    def update(self, dt, f):
+        self.t += dt
+        self.update_fx(dt, f)
+        if self.fade > 0:
+            self.fade = max(0.0, self.fade - dt * 2.2)
+        if self.state == READY:
+            self.ready_t += dt
+            self.control_paddle(f)
+            self.paddle.update(dt, f)
+            for b in self.balls:
+                self.update_ball(b, f)
+        elif self.state == PLAYING:
+            self.update_playing(dt, f)
+        elif self.state == LEVEL_CLEAR:
+            self.state_timer -= dt
+            if self.state_timer <= 0:
+                self.proceed()
+
+    # ----- event -----
+    def perk_card_rect(self, i):
+        return pygame.Rect(40 + i * 250, 190, 220, 300)
+
+    def perk_at(self, pos):
+        for i in range(len(self.perk_choices)):
+            if self.perk_card_rect(i).collidepoint(pos[0], pos[1]):
+                return i
+        return None
+
+    def handle_events(self):
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                self.running = False
+            elif e.type == pygame.MOUSEMOTION:
+                self.mouse_x = e.pos[0]
+                self.mouse_mode = True
+                if self.state == PERK:
+                    i = self.perk_at(e.pos)
+                    if i is not None:
+                        self.perk_sel = i
+                elif self.state == MENU:
+                    i = self.menu_at(e.pos)
+                    if i is not None and i != self.menu_sel:
+                        self.menu_sel = i
+                        self.sfx.play("paddle")
+                elif self.state == PAUSED:
+                    i = self.pause_at(e.pos)
+                    if i is not None and i != self.pause_sel:
+                        self.pause_sel = i
+                        self.sfx.play("paddle")
+            elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                if self.state == PERK:
+                    i = self.perk_at(e.pos)
+                    if i is not None:
+                        self.confirm_perk(i)
+                elif self.state == MENU:
+                    i = self.menu_at(e.pos)
+                    if i is not None:
+                        self.menu_sel = i
+                        self.menu_activate(i)
+                elif self.state == PAUSED:
+                    i = self.pause_at(e.pos)
+                    if i is not None:
+                        self.pause_sel = i
+                        self.pause_activate(i)
+                elif self.state == HOWTO:
+                    if self.back_rect().collidepoint(e.pos):
+                        self.sfx.play("paddle")
+                        self.go_menu(keep_sel=True)
+                elif self.state == CODEX:
+                    for i in range(len(CODEX_TABS)):
+                        if self.codex_tab_rect(i).collidepoint(e.pos):
+                            self.codex_page = i
+                            self.sfx.play("paddle")
+                    if self.back_rect().collidepoint(e.pos):
+                        self.sfx.play("paddle")
+                        self.go_menu(keep_sel=True)
+                else:
+                    self.action()
+            elif e.type == pygame.KEYDOWN:
+                k = e.key
+                if self.state == MENU:
+                    n = len(self.menu_items())
+                    if k in (pygame.K_UP, pygame.K_w):
+                        self.menu_sel = (self.menu_sel - 1) % n
+                        self.sfx.play("paddle")
+                    elif k in (pygame.K_DOWN, pygame.K_s):
+                        self.menu_sel = (self.menu_sel + 1) % n
+                        self.sfx.play("paddle")
+                    elif k in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_KP_ENTER):
+                        self.menu_activate(self.menu_sel)
+                    elif k == pygame.K_ESCAPE:
+                        self.running = False
+                    continue
+                if self.state == PAUSED:
+                    n = len(self.pause_items())
+                    if k in (pygame.K_UP, pygame.K_w):
+                        self.pause_sel = (self.pause_sel - 1) % n
+                        self.sfx.play("paddle")
+                    elif k in (pygame.K_DOWN, pygame.K_s):
+                        self.pause_sel = (self.pause_sel + 1) % n
+                        self.sfx.play("paddle")
+                    elif k in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_KP_ENTER):
+                        self.pause_activate(self.pause_sel)
+                    elif k in (pygame.K_p, pygame.K_ESCAPE):
+                        self.state = self.prev_state
+                    elif k == pygame.K_m:
+                        self.pause_activate(2)
+                    continue
+                if self.state in (HOWTO, CODEX):
+                    if k in (pygame.K_ESCAPE, pygame.K_BACKSPACE,
+                             pygame.K_RETURN, pygame.K_SPACE):
+                        self.sfx.play("paddle")
+                        self.go_menu(keep_sel=True)
+                    elif self.state == CODEX and k in (pygame.K_LEFT, pygame.K_a):
+                        self.codex_page = (self.codex_page - 1) % len(CODEX_TABS)
+                        self.sfx.play("paddle")
+                    elif self.state == CODEX and k in (pygame.K_RIGHT, pygame.K_d):
+                        self.codex_page = (self.codex_page + 1) % len(CODEX_TABS)
+                        self.sfx.play("paddle")
+                    continue
+                if self.state == PERK:
+                    if k in (pygame.K_1, pygame.K_2, pygame.K_3):
+                        self.confirm_perk(k - pygame.K_1)
+                    elif k == pygame.K_LEFT:
+                        self.perk_sel = (self.perk_sel - 1) % len(self.perk_choices)
+                    elif k == pygame.K_RIGHT:
+                        self.perk_sel = (self.perk_sel + 1) % len(self.perk_choices)
+                    elif k in (pygame.K_SPACE, pygame.K_RETURN):
+                        self.confirm_perk(self.perk_sel)
+                    continue
+                if k in (pygame.K_SPACE, pygame.K_RETURN):
+                    self.action()
+                elif k in (pygame.K_p, pygame.K_ESCAPE):
+                    if self.state in (READY, PLAYING):
+                        self.prev_state = self.state
+                        self.state = PAUSED
+                        self.pause_sel = 0
+                    elif self.state == PAUSED:
+                        self.state = self.prev_state
+                    elif k == pygame.K_ESCAPE and self.state in (GAME_OVER, WIN):
+                        self.go_menu()
+                elif k == pygame.K_m and self.state == PAUSED:
+                    self.update_high()
+                    self.save_high()
+                    self.go_menu()
+
+    # ----- gambar -----
+    def text(self, surf, msg, font, color, pos, anchor="center", shadow=True):
+        img = font.render(msg, True, color)
+        rect = img.get_rect()
+        setattr(rect, anchor, pos)
+        if shadow:
+            surf.blit(font.render(msg, True, BLACK), rect.move(2, 2))
+        surf.blit(img, rect)
+
+    def title_text(self, surf, msg, font, center, fill=(255, 205, 70),
+                   light=(255, 240, 150), outline=(70, 36, 6)):
+        """Teks judul bergaya 3D: outline tebal, bayangan, dan highlight atas."""
+        img = font.render(msg, True, fill)
+        top = font.render(msg, True, light)
+        out = font.render(msg, True, outline)
+        rect = img.get_rect(center=center)
+        for dx, dy in ((-3, 0), (3, 0), (0, -3), (0, 3), (-3, -3), (3, -3),
+                       (-3, 3), (3, 3), (0, 6), (-3, 6), (3, 6), (0, 5)):
+            surf.blit(out, rect.move(dx, dy))
+        surf.blit(img, rect)
+        surf.set_clip(pygame.Rect(0, rect.top, WIDTH, rect.h // 2 - 2))
+        surf.blit(top, rect)
+        surf.set_clip(None)
+
+    def panel(self, s, rect, border=(100, 100, 110)):
+        pygame.draw.rect(s, (30, 30, 36), rect)
+        pygame.draw.rect(s, border, rect, 3)
+        pygame.draw.rect(s, (14, 14, 18), rect.inflate(-6, -6), 1)
+
+    def draw_button(self, s, r, label, sel, icon=None, font=None):
+        font = font or self.f_med
+        s.blit(self.get_button(r.w, r.h, sel), r)
+        pygame.draw.rect(s, GOLD if sel else (22, 22, 28), r, 3 if sel else 2)
+        if icon:
+            s.blit(self.sprites.get(icon, 2), (r.x + 16, r.centery - 8))
+        self.text(s, label, font, GOLD if sel else WHITE, r.center)
+        if sel:
+            cy = r.centery
+            bob = int(abs(math.sin(self.t * 6)) * 5)
+            ax = r.left - 12 - bob
+            bx = r.right + 12 + bob
+            for pts in ([(ax - 11, cy - 10), (ax, cy), (ax - 11, cy + 10)],
+                        [(bx + 11, cy - 10), (bx, cy), (bx + 11, cy + 10)]):
+                pygame.draw.polygon(s, GOLD, pts)
+                pygame.draw.polygon(s, BLACK, pts, 2)
+
+    def draw_background(self, s):
+        s.blit(self.bgs[self.theme], (0, 0))
+        if self.theme == "day":
+            for x, y, _, _, col in self.bg_items:
+                pygame.draw.rect(s, col, (int(x), int(y), 72, 16))
+                pygame.draw.rect(s, col, (int(x) + 14, int(y) - 12, 40, 14))
+        else:
+            for x, y, _, size, col in self.bg_items:
+                pygame.draw.rect(s, col, (int(x), int(y), size, size))
+
+    def draw_ball(self, s, b):
+        n = len(b.trail)
+        for i, (tx, ty) in enumerate(b.trail):
+            k = (i + 1) / (n + 1)
+            size = max(2, int(10 * k))
+            col = (255, 150, 40) if self.pierce_timer > 0 else (150, 210, 255)
+            pygame.draw.rect(s, shade(col, 0.6 * k),
+                             (int(tx) - size // 2, int(ty) - size // 2, size, size))
+        s.blit(self.glow_ball, (int(b.x) - 24, int(b.y) - 24))
+        img = self.ball_imgs["fire" if self.pierce_timer > 0 else "normal"]
+        s.blit(img, (int(b.x) - 7, int(b.y) - 7))
+
+    def draw_dragon(self, s, b):
+        r = b.rect
+        flap = math.sin(self.t * 4) * 20
+        wing = (46, 28, 70)
+        for side in (-1, 1):
+            bx = r.centerx + side * 40
+            pygame.draw.polygon(s, wing, [
+                (bx, r.top + 14), (bx + side * 120, r.top - 36 + flap),
+                (bx + side * 90, r.top + 20), (bx + side * 40, r.top + 40)])
+            pygame.draw.polygon(s, (80, 50, 120), [
+                (bx, r.top + 14), (bx + side * 120, r.top - 36 + flap),
+                (bx + side * 95, r.top - 8 + flap * 0.5)], 2)
+        for i in range(r.w // 10):
+            for j in range(r.h // 10):
+                n = hash_noise(i, j, 31)
+                col = vary((28, 22, 40), 0.5, n)
+                if n > 0.93:
+                    col = (70, 40, 110)
+                pygame.draw.rect(s, col, (r.x + i * 10, r.y + j * 10, 10, 10))
+        hx = r.right - 4 if b.dir > 0 else r.left - 46
+        pygame.draw.rect(s, (36, 28, 50), (hx, r.y + 6, 50, 50))
+        pygame.draw.rect(s, (90, 60, 130), (hx, r.y + 6, 50, 50), 2)
+        ex = hx + (30 if b.dir > 0 else 8)
+        pygame.draw.rect(s, (255, 80, 230), (ex, r.y + 18, 12, 8))
+        pygame.draw.rect(s, (255, 80, 230), (ex + (0 if b.dir > 0 else 22), r.y + 30, 12, 8))
+        if b.flash > 0:
+            pygame.draw.rect(s, (255, 255, 255), r, 3)
+
+    def draw_boss(self, s):
+        b = self.boss
+        if not b or not b.alive:
+            return
+        r = b.rect
+        if b.kind == "dragon":
+            self.draw_dragon(s, b)
+            return
+        s.blit(self.boss_tex[b.kind], r)
+        fuse = b.kind == "creeper" and b.attack_cd < 0.5 and self.state == PLAYING
+        if b.flash > 0 or (fuse and int(self.t * 20) % 2 == 0):
+            s.blit(self.boss_flash[b.kind], r)
+
+    def draw_world(self, s):
+        self.draw_background(s)
+        for b in self.bricks:
+            if b.alive:
+                b.draw(s)
+        self.draw_boss(s)
+        for pu in self.powerups:
+            pu.draw(s, self.sprites)
+        for pr in self.projectiles:
+            pr.draw(s)
+        for lx, ly in self.lasers:
+            pygame.draw.rect(s, (150, 110, 60), (int(lx) - 1, int(ly), 3, 14))
+            pygame.draw.rect(s, (210, 210, 220), (int(lx) - 3, int(ly) - 4, 7, 5))
+        for b in self.balls:
+            self.draw_ball(s, b)
+        if not (self.invuln > 0 and int(self.t * 15) % 2 == 0):
+            self.paddle.draw(s)
+        for x, y, _, _, life, col, size in self.particles:
+            k = clamp(life / 0.5, 0.2, 1.0)
+            pygame.draw.rect(s, shade(col, k), (int(x), int(y), size, size))
+        for x, y, msg, life, col in self.texts:
+            self.text(s, msg, self.f_small, shade(col, clamp(life / 0.5, 0.3, 1.0)),
+                      (int(x), int(y)))
+        self.draw_hud(s)
+        self.draw_bottom_bar(s)
+
+    def draw_hud(self, s):
+        pygame.draw.rect(s, (24, 24, 28), (0, 0, WIDTH, HUD_H))
+        pygame.draw.rect(s, (70, 70, 78), (0, HUD_H - 3, WIDTH, 3))
+        self.text(s, "SKOR %06d" % self.score, self.f_med, WHITE, (12, 20), "midleft")
+        self.text(s, "REKOR %06d" % self.high, self.f_small, GRAY, (170, 21), "midleft")
+        self.text(s, "STAGE %d/%d" % (self.stage_idx + 1, len(STAGES)), self.f_small,
+                  (170, 220, 255), (300, 21), "midleft")
+        if self.combo >= 3:
+            self.text(s, "COMBO %d  x%g" % (self.combo, round(self.multiplier(), 2)),
+                      self.f_small, GOLD, (410, 21), "midleft")
+        heart = self.sprites.get("heart", 2)
+        for i in range(self.max_lives):
+            s.blit(heart if i < self.lives else self.heart_off,
+                   (WIDTH - 12 - (i + 1) * 18, 12))
+        b = self.boss
+        if b and b.alive:
+            bw = 420
+            bx = (WIDTH - bw) // 2
+            by = HUD_H - 20
+            pygame.draw.rect(s, BLACK, (bx - 2, by - 2, bw + 4, 12))
+            pygame.draw.rect(s, (60, 20, 20), (bx, by, bw, 8))
+            col = (220, 40, 50) if b.phase == 1 else (255, 150, 30)
+            pygame.draw.rect(s, col, (bx, by, int(bw * max(0.0, b.hp) / b.max_hp), 8))
+            self.text(s, b.name.upper(), self.f_tiny, WHITE, (bx - 10, by + 4), "midright")
+
+    def draw_bottom_bar(self, s):
+        chips = []
+        p = self.paddle
+        if p.effect_timer > 0:
+            if p.target_w > p.base_w:
+                chips.append(("PERISAI", p.effect_timer, POWERUPS["W"][2]))
+            else:
+                chips.append(("WITHER", p.effect_timer, POWERUPS["N"][2]))
+        if self.slow_timer > 0:
+            chips.append(("SOUL SAND", self.slow_timer, POWERUPS["S"][2]))
+        if p.laser_timer > 0:
+            chips.append(("BUSUR", p.laser_timer, POWERUPS["G"][2]))
+        if self.pierce_timer > 0:
+            chips.append(("PICKAXE", self.pierce_timer, POWERUPS["P"][2]))
+        x = 10
+        for name, t, col in chips:
+            self.text(s, "%s %.0fs" % (name, t), self.f_tiny, col, (x, HEIGHT - 12),
+                      "midleft")
+            x += 105
+        x = WIDTH - 10
+        if self.totems > 0:
+            x -= 20
+            s.blit(self.sprites.get("totem", 2), (x, HEIGHT - 24))
+            self.text(s, str(self.totems), self.f_tiny, WHITE, (x - 2, HEIGHT - 12),
+                      "midright")
+        for pid, lv in self.perks.items():
+            if pid == "totem":
+                continue
+            x -= 38
+            s.blit(self.sprites.get(PERKS[pid]["sprite"], 2), (x, HEIGHT - 24))
+            self.text(s, str(lv), self.f_tiny, GOLD, (x + 18, HEIGHT - 12), "midleft")
+
