@@ -1978,3 +1978,298 @@ class Game:
             s.blit(self.sprites.get(PERKS[pid]["sprite"], 2), (x, HEIGHT - 24))
             self.text(s, str(lv), self.f_tiny, GOLD, (x + 18, HEIGHT - 12), "midleft")
 
+
+    # ----- menu utama -----
+    def draw_menu_scenery(self, s):
+        for x, far, near in self.hills:
+            pygame.draw.rect(s, (122, 180, 112), (x, GROUND_Y - far, 32, far))
+        for x, far, near in self.hills:
+            pygame.draw.rect(s, (84, 150, 64), (x, GROUND_Y - near, 32, near))
+        for i in range(WIDTH // BRICK_W + 1):
+            s.blit(TEX["g"], (i * BRICK_W, GROUND_Y))
+            s.blit(TEX["d"], (i * BRICK_W, GROUND_Y + BRICK_H))
+        for x, y, kind, ph in self.menu_blocks:
+            by = y + int(math.sin(self.t * 1.5 + ph) * 8)
+            sw = int(BRICK_W * (0.55 - 0.08 * math.sin(self.t * 1.5 + ph)))
+            pygame.draw.ellipse(s, (96, 150, 86),
+                                (x + (BRICK_W - sw) // 2, y + BRICK_H + 18, sw, 6))
+            s.blit(TEX[kind], (x, by))
+
+    def draw_menu(self, s):
+        self.theme = "day"
+        self.draw_background(s)
+        self.draw_menu_scenery(s)
+
+        bob = math.sin(self.t * 2) * 4
+        self.title_text(s, "BRICK BREAKER", self.f_title, (WIDTH // 2, 78 + bob))
+        # sub-judul dengan ikon
+        self.text(s, "CRAFT EDITION", self.f_med, WHITE, (WIDTH // 2, 138))
+        dia = self.sprites.get("diamond", 3)
+        s.blit(dia, (WIDTH // 2 - 160, 126))
+        s.blit(dia, (WIDTH // 2 + 136, 126))
+        # splash text miring berdenyut
+        pulse = 1 + 0.06 * math.sin(self.t * 5)
+        sp = self.f_small.render(self.splash, True, (255, 255, 70))
+        sh = self.f_small.render(self.splash, True, (60, 60, 0))
+        base = pygame.Surface((sp.get_width() + 2, sp.get_height() + 2), pygame.SRCALPHA)
+        base.blit(sh, (2, 2))
+        base.blit(sp, (0, 0))
+        base = pygame.transform.rotozoom(base, 14, pulse)
+        s.blit(base, base.get_rect(center=(676, 150)))
+
+        for i, (label, icon) in enumerate(self.menu_items()):
+            self.draw_button(s, self.menu_rect(i), label, i == self.menu_sel, icon)
+
+        self.text(s, "REKOR TERTINGGI : %06d" % self.high, self.f_small, GOLD,
+                  (WIDTH // 2, 540))
+        self.text(s, "ATAS/BAWAH atau MOUSE : pilih     ENTER / KLIK : konfirmasi",
+                  self.f_tiny, WHITE, (WIDTH // 2, 566))
+        self.text(s, "v0.05  Craft Edition", self.f_tiny, WHITE,
+                  (WIDTH - 10, HEIGHT - 10), "bottomright")
+
+    # ----- layar sub-menu -----
+    def draw_frame(self, s, title):
+        self.theme = "day"
+        self.draw_background(s)
+        s.blit(self.dim_light, (0, 0))
+        self.title_text(s, title, self.f_big, (WIDTH // 2, 56))
+        mp = pygame.mouse.get_pos()
+        back = self.back_rect()
+        self.draw_button(s, back, "KEMBALI (ESC)", back.collidepoint(mp),
+                         font=self.f_small)
+
+    def draw_keycap(self, s, label, x, y):
+        img = self.f_tiny.render(label, True, WHITE)
+        w = max(28, img.get_width() + 16)
+        r = pygame.Rect(x, y, w, 28)
+        pygame.draw.rect(s, (62, 62, 72), r)
+        pygame.draw.rect(s, (110, 110, 124), (r.x, r.y, w, 3))
+        pygame.draw.rect(s, (30, 30, 36), (r.x, r.bottom - 5, w, 5))
+        pygame.draw.rect(s, (14, 14, 18), r, 2)
+        s.blit(img, img.get_rect(center=(r.centerx, r.centery - 1)))
+        return x + w + 6
+
+    def draw_howto(self, s):
+        self.draw_frame(s, "CARA BERMAIN")
+        self.panel(s, pygame.Rect(40, 130, 720, 440))
+        self.text(s, "KONTROL", self.f_med, GOLD, (70, 160), "midleft")
+        rows = [(["<", ">", "A", "D", "MOUSE"], "Gerakkan paddle"),
+                (["SPACE", "KLIK"], "Luncurkan bola / tembak panah"),
+                (["P", "ESC"], "Pause permainan"),
+                (["1", "2", "3"], "Pilih perk setelah boss")]
+        for i, (keys, desc) in enumerate(rows):
+            y = 190 + i * 40
+            x = 70
+            for kname in keys:
+                x = self.draw_keycap(s, kname, x, y)
+            self.text(s, desc, self.f_small, WHITE, (360, y + 14), "midleft")
+        self.text(s, "TIPS", self.f_med, GOLD, (70, 376), "midleft")
+        tips = ["Pantulkan bola dan hancurkan semua blok untuk menamatkan stage.",
+                "Titik tabrak di paddle menentukan sudut pantulan bola.",
+                "Pukul proyektil boss dengan bola atau panah agar tidak kena.",
+                "Jaga combo tetap tinggi untuk pengali skor yang besar.",
+                "Kalahkan boss, lalu pilih 1 dari 3 perk permanen."]
+        for i, tip in enumerate(tips):
+            self.text(s, "-  " + tip, self.f_small, GRAY, (70, 410 + i * 28), "midleft")
+
+    def draw_codex(self, s):
+        self.draw_frame(s, "KOLEKSI")
+        mp = pygame.mouse.get_pos()
+        for i, name in enumerate(CODEX_TABS):
+            r = self.codex_tab_rect(i)
+            sel = i == self.codex_page
+            s.blit(self.get_button(r.w, r.h, sel or r.collidepoint(mp)), r)
+            pygame.draw.rect(s, GOLD if sel else (22, 22, 28), r, 3 if sel else 2)
+            self.text(s, name, self.f_small, GOLD if sel else WHITE, r.center)
+        self.text(s, "KIRI / KANAN : ganti tab", self.f_tiny, WHITE,
+                  (760, 121), "midright")
+        self.panel(s, pygame.Rect(40, 144, 720, 428))
+
+        page = self.codex_page
+        if page == 0:
+            for idx, k in enumerate("dgpsobtDc"):
+                x = 66 + (idx % 3) * 236
+                y = 170 + (idx // 3) * 124
+                if k == "c":
+                    Brick(x, y, "c", 0).draw(s)
+                else:
+                    s.blit(TEX[k], (x, y))
+                name, desc = BLOCK_DESC[k]
+                self.text(s, name, self.f_small, WHITE, (x, y + 34), "topleft")
+                self.text(s, desc, self.f_tiny, GRAY, (x, y + 58), "topleft")
+                pts = BLOCK_INFO[k][1]
+                if pts:
+                    self.text(s, "Poin %d" % pts, self.f_tiny, GOLD, (x, y + 78), "topleft")
+        elif page == 1:
+            for i, k in enumerate("WNSMLGP"):
+                y = 168 + i * 56
+                col = POWERUPS[k][2]
+                pygame.draw.rect(s, col, (72, y - 4, 40, 40), 2)
+                s.blit(self.sprites.get(POWERUPS[k][1], 4), (76, y))
+                self.text(s, POWERUPS[k][0], self.f_small, col, (132, y + 16), "midleft")
+                self.text(s, ITEM_DESC[k], self.f_small, GRAY, (320, y + 16), "midleft")
+        elif page == 2:
+            for i, (pid, info) in enumerate(PERKS.items()):
+                x = 64 + (i // 5) * 352
+                y = 166 + (i % 5) * 78
+                s.blit(self.sprites.get(info["sprite"], 4), (x, y + 6))
+                self.text(s, "%s  (maks Lv %d)" % (info["name"], info["max"]),
+                          self.f_small, WHITE, (x + 48, y + 6), "topleft")
+                self.text(s, " ".join(info["desc"]), self.f_tiny, GRAY,
+                          (x + 48, y + 32), "topleft")
+        else:
+            for i, (key, name, d1, d2) in enumerate(BOSS_INFO):
+                y = 160 + i * 134
+                icon = self.boss_icons[key]
+                s.blit(icon, icon.get_rect(center=(138, y + 62)))
+                self.text(s, name, self.f_med, GOLD, (250, y + 18), "topleft")
+                self.text(s, "HP %d" % BOSS_DATA[key]["hp"], self.f_small,
+                          (255, 120, 110), (250, y + 48), "topleft")
+                self.text(s, d1, self.f_small, WHITE, (250, y + 72), "topleft")
+                self.text(s, d2, self.f_small, GRAY, (250, y + 94), "topleft")
+
+    def draw_banner(self, s, st):
+        """Banner intro stage: pita gelap yang meluncur dari kiri/kanan."""
+        k = min(1.0, self.ready_t / 0.45)
+        off = int((1 - k) ** 3 * WIDTH)
+        boss = bool(st.get("boss"))
+        cy = HEIGHT - 210
+        band = pygame.Surface((WIDTH, 96), pygame.SRCALPHA)
+        band.fill((90, 10, 14, 190) if boss else (0, 0, 20, 170))
+        s.blit(band, (0, cy - 48))
+        line = (255, 90, 90) if boss else GOLD
+        pygame.draw.rect(s, line, (0, cy - 48, WIDTH, 3))
+        pygame.draw.rect(s, line, (0, cy + 45, WIDTH, 3))
+        sub = ("PERINGATAN! BOSS" if boss else
+               "STAGE %d / %d" % (self.stage_idx + 1, len(STAGES)))
+        self.text(s, sub, self.f_small, line, (WIDTH // 2 - off, cy - 20))
+        self.text(s, st["name"].upper(), self.f_big, WHITE, (WIDTH // 2 + off, cy + 12))
+        if boss:
+            self.text(s, "Pukul proyektilnya untuk menghancurkannya!", self.f_small,
+                      WHITE, (WIDTH // 2, cy + 74))
+
+    def draw_pause(self, s):
+        s.blit(self.dim, (0, 0))
+        self.title_text(s, "PAUSE", self.f_title, (WIDTH // 2, 160))
+        for i, (label, icon) in enumerate(self.pause_items()):
+            self.draw_button(s, self.pause_rect(i), label, i == self.pause_sel, icon)
+        self.text(s, "P / ESC : lanjut main", self.f_tiny, GRAY, (WIDTH // 2, 450))
+
+    def draw_result(self, s, title, color, rows, prompt, note=None):
+        """Panel hasil (stage selesai / game over / menang)."""
+        s.blit(self.dim, (0, 0))
+        light = tuple(min(255, int(c * 1.2 + 25)) for c in color)
+        self.title_text(s, title, self.f_big, (WIDTH // 2, 150), fill=color,
+                        light=light, outline=(30, 20, 10))
+        h = 36 + len(rows) * 42 + (38 if note else 0)
+        r = pygame.Rect(200, 200, 400, h)
+        self.panel(s, r, color)
+        for i, (label, value) in enumerate(rows):
+            y = r.y + 36 + i * 42
+            self.text(s, label, self.f_med, GRAY, (r.x + 30, y), "midleft")
+            self.text(s, value, self.f_med, GOLD, (r.right - 30, y), "midright")
+        if note and int(self.t * 3) % 2 == 0:
+            self.text(s, note, self.f_small, (120, 230, 140),
+                      (r.centerx, r.bottom - 26))
+        if int(self.t * 2) % 2 == 0:
+            self.text(s, prompt, self.f_small, WHITE, (WIDTH // 2, r.bottom + 40))
+
+    def overlay(self, s, title, lines, color=WHITE):
+        s.blit(self.dim, (0, 0))
+        self.text(s, title, self.f_big, color, (WIDTH // 2, HEIGHT // 2 - 80))
+        for i, ln in enumerate(lines):
+            self.text(s, ln, self.f_med, WHITE, (WIDTH // 2, HEIGHT // 2 - 20 + i * 36))
+
+    def draw_perk(self, s):
+        s.blit(self.dim, (0, 0))
+        self.text(s, "BOSS DIKALAHKAN!", self.f_big, GOLD, (WIDTH // 2, 95))
+        self.text(s, "Pilih 1 power-up permanen  (tekan 1 / 2 / 3 atau klik kartu)",
+                  self.f_small, WHITE, (WIDTH // 2, 140))
+        for i, pid in enumerate(self.perk_choices):
+            r = self.perk_card_rect(i)
+            sel = i == self.perk_sel
+            self.panel(s, r, GOLD if sel else (100, 100, 110))
+            info = PERKS[pid]
+            cur = self.lv(pid)
+            icon = self.sprites.get(info["sprite"], 6)
+            s.blit(icon, icon.get_rect(center=(r.centerx, r.y + 70)))
+            self.text(s, "[%d]" % (i + 1), self.f_small, GOLD, (r.x + 14, r.y + 18), "midleft")
+            self.text(s, info["name"], self.f_small, WHITE, (r.centerx, r.y + 135))
+            lvl = "BARU" if cur == 0 else "Lv %d -> %d" % (cur, cur + 1)
+            self.text(s, lvl, self.f_small, (120, 230, 140), (r.centerx, r.y + 168))
+            for j, ln in enumerate(info["desc"]):
+                self.text(s, ln, self.f_tiny, GRAY, (r.centerx, r.y + 215 + j * 24))
+
+    def draw(self):
+        s = self.canvas
+        if self.state == MENU:
+            self.draw_menu(s)
+        elif self.state == HOWTO:
+            self.draw_howto(s)
+        elif self.state == CODEX:
+            self.draw_codex(s)
+        else:
+            self.draw_world(s)
+            st = STAGES[self.stage_idx]
+            if self.state == READY:
+                if self.banner:
+                    self.draw_banner(s, st)
+                    py = HEIGHT - 120
+                else:
+                    self.text(s, "Nyawa tersisa : %d" % self.lives, self.f_med,
+                              WHITE, (WIDTH // 2, HEIGHT - 180))
+                    py = HEIGHT - 140
+                if int(self.t * 2.5) % 2 == 0:
+                    self.text(s, "SPACE / KLIK untuk meluncurkan", self.f_small,
+                              GOLD, (WIDTH // 2, py))
+            elif self.state == PAUSED:
+                self.draw_pause(s)
+            elif self.state == LEVEL_CLEAR:
+                title = "BOSS KALAH!" if self.cleared_boss else "STAGE SELESAI!"
+                self.draw_result(s, title, GOLD,
+                                 [("Bonus", "+%d" % self.bonus),
+                                  ("Skor", "%d" % self.score)],
+                                 "SPACE untuk lanjut")
+            elif self.state == PERK:
+                self.draw_perk(s)
+            elif self.state == GAME_OVER:
+                self.draw_result(s, "GAME OVER", (255, 100, 110),
+                                 [("Skor", "%d" % self.score),
+                                  ("Rekor", "%d" % self.high),
+                                  ("Stage", "%d / %d" % (self.stage_idx + 1, len(STAGES)))],
+                                 "SPACE : main lagi     ESC : menu",
+                                 "REKOR BARU!" if self.new_record else None)
+            elif self.state == WIN:
+                self.draw_result(s, "ENDER DRAGON KALAH!", GOLD,
+                                 [("Skor akhir", "%d" % self.score),
+                                  ("Rekor", "%d" % self.high)],
+                                 "SPACE : main lagi     ESC : menu",
+                                 "REKOR BARU!" if self.new_record
+                                 else "Kamu menamatkan semua stage!")
+
+        if self.fade > 0:
+            self.fade_surf.set_alpha(int(255 * self.fade))
+            s.blit(self.fade_surf, (0, 0))
+
+        ox = oy = 0
+        if self.shake > 0:
+            m = int(min(6, self.shake // 2 + 1))
+            ox, oy = random.randint(-m, m), random.randint(-m, m)
+        self.screen.fill(BLACK)
+        self.screen.blit(s, (ox, oy))
+        pygame.display.flip()
+
+    def run(self):
+        while self.running:
+            dt = min(self.clock.tick(FPS) / 1000.0, 0.05)
+            f = dt * 60.0
+            self.handle_events()
+            self.update(dt, f)
+            self.draw()
+        self.update_high()
+        self.save_high()
+        pygame.quit()
+
+
+if __name__ == "__main__":
+    Game().run()
